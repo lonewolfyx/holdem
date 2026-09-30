@@ -2,7 +2,7 @@
   "name": "holdem",
   "private": true,
   "type": "module",
-  "packageManager": "pnpm@11.24.0",
+  "packageManager": "pnpm@11.28.2",
   "scripts": {
     "dev": "nuxt dev",
     "build": "nuxt build",
