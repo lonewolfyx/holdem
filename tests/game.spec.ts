@@ -90,7 +90,7 @@ describe('PokerGame 引擎', () => {
     expect(game.hand?.results).not.toBeNull()
     // 结算后 totalBet 仅作展示，守恒看纯筹码和
     const stacks = [...game.players.values()].reduce((s, p) => s + p.stack, 0)
-    expect(stacks).toBe(60_000)
+    expect(stacks).toBe(3 * game.cfg.buyIn)
     // community 应该有 5 张
     expect(game.community.length).toBe(5)
   })

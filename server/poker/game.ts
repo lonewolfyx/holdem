@@ -27,7 +27,7 @@ export interface GameConfig {
 export const DEFAULT_CONFIG: GameConfig = {
   smallBlind: 50,
   bigBlind: 100,
-  buyIn: 20000,
+  buyIn: 50_000_000, // 每人默认额度 5000万
   minPlayers: 3,
   maxPlayers: 10,
   turnMs: 25_000,
