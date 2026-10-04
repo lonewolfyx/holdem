@@ -13,34 +13,10 @@ function mulberry32(seed: number) {
   }
 }
 
-class FakeClock {
-  nowMs = 0
-  private seq = 0
-  private items: Array<{ at: number, fn: () => void, seq: number }> = []
-  schedule = (fn: () => void, ms: number) => {
-    const item = { at: this.nowMs + ms, fn, seq: this.seq++ }
-    this.items.push(item)
-    return () => {
-      this.items = this.items.filter(i => i !== item)
-    }
-  }
-  now = () => this.nowMs
-  advance(to: number) {
-    for (;;) {
-      const due = this.items.filter(i => i.at <= to)
-        .sort((a, b) => a.at - b.at || a.seq - b.seq)[0]
-      if (!due) break
-      this.nowMs = Math.max(this.nowMs, due.at)
-      this.items = this.items.filter(i => i !== due)
-      due.fn()
-    }
-    this.nowMs = Math.max(this.nowMs, to)
-  }
-}
-
 function runSeededGame(seed: number) {
   const rng = mulberry32(seed)
-  const clock = new FakeClock()
+  let nowMs = 0
+  const now = () => nowMs
   const playerCount = 3 + Math.floor(rng() * 8) // 3..10
   const initial = new Map<string, number>()
   let violations = ''
@@ -63,8 +39,7 @@ function runSeededGame(seed: number) {
 
   const game = new PokerGame({
     rng,
-    schedule: clock.schedule,
-    now: clock.now,
+    now,
     onChange: check,
     config: {
       bigBlind: 100,
@@ -92,11 +67,13 @@ function runSeededGame(seed: number) {
 
   game.startGame([...game.players.keys()][0]!)
 
-  // 推进到游戏结束（只剩一人有筹码）或达到手数上限
+  // 推进到游戏结束（只剩一人有筹码）或达到手数上限；
+  // 每次 tick 只执行一个到期事件，模拟轮询驱动
   let hands = 0
   let lastHandNo = 0
   for (let step = 0; step < 300_000; step++) {
-    clock.advance(clock.nowMs + 4000)
+    nowMs += 500
+    game.tick(nowMs)
     if (game.phase === 'ended') break
     if (game.handNo > lastHandNo) {
       lastHandNo = game.handNo

@@ -1,42 +1,18 @@
 import { describe, expect, it } from 'vitest'
-import { PokerGame, type Scheduler } from '../server/poker/game'
+import { PokerGame } from '../server/poker/game'
 
-/** 虚拟时钟：手动推进定时器，确定性测试 */
+/** 虚拟时钟：手动推进时间，配合 game.tick() 确定性驱动待处理事件 */
 class FakeClock {
   nowMs = 0
-  private seq = 0
-  private items: Array<{ at: number, fn: () => void, seq: number }> = []
-
-  schedule = (fn: () => void, ms: number): (() => void) => {
-    const item = { at: this.nowMs + ms, fn, seq: this.seq++ }
-    this.items.push(item)
-    return () => {
-      this.items = this.items.filter(i => i !== item)
-    }
-  }
-
   now = () => this.nowMs
 
   advance(to: number) {
-    for (;;) {
-      const due = this.items.filter(i => i.at <= to)
-        .sort((a, b) => a.at - b.at || a.seq - b.seq)[0]
-      if (!due) break
-      this.nowMs = Math.max(this.nowMs, due.at)
-      this.items = this.items.filter(i => i !== due)
-      due.fn()
-    }
     this.nowMs = Math.max(this.nowMs, to)
-  }
-
-  get pending() {
-    return this.items.length
   }
 }
 
 function makeGame(clock: FakeClock) {
   const game = new PokerGame({
-    schedule: clock.schedule as Scheduler,
     now: clock.now,
     config: {
       turnMs: 25_000,
@@ -49,6 +25,12 @@ function makeGame(clock: FakeClock) {
   })
   game.code = 'TEST'
   return game
+}
+
+/** 推进时间并执行到期的待处理事件（机器人/超时/跑马/结算/下一局） */
+function step(game: PokerGame, clock: FakeClock, ms: number) {
+  clock.advance(clock.nowMs + ms)
+  game.tick(clock.nowMs)
 }
 
 const join3 = (game: PokerGame) => {
@@ -71,6 +53,36 @@ describe('PokerGame 引擎', () => {
     expect(game.toActId).not.toBeNull()
   })
 
+  it('序列化往返后状态一致并能继续推进', () => {
+    const clock = new FakeClock()
+    const game = makeGame(clock)
+    join3(game)
+    game.startGame('a')
+    const snap = JSON.parse(JSON.stringify(game.serialize()))
+    const restored = PokerGame.restore(snap, { now: clock.now })
+    expect(restored.players.size).toBe(3)
+    expect(restored.hand?.pot).toBe(150)
+    expect(restored.toActId).toBe(game.toActId)
+    // 恢复后可继续行动
+    const toAct = restored.toActId!
+    restored.act(toAct, 'call')
+    expect(restored.players.get(toAct)!.roundBet).toBe(100)
+  })
+
+  it('tick 惰性推进：超时自动过牌/弃牌在请求时补执行', () => {
+    const clock = new FakeClock()
+    const game = makeGame(clock)
+    join3(game)
+    game.startGame('a')
+    const first = game.toActId!
+    // 时间流逝但无人请求 → 状态冻结（serverless 安全）
+    clock.advance(clock.nowMs + 100_000)
+    expect(game.players.get(first)!.folded).toBe(false)
+    // 请求到来 → tick 补执行超时行动
+    game.tick(clock.nowMs)
+    expect(game.players.get(first)!.folded).toBe(true) // 面对大盲注，超时弃牌
+  })
+
   it('平跟到河牌并摊牌，筹码守恒', () => {
     const clock = new FakeClock()
     const game = makeGame(clock)
@@ -86,7 +98,7 @@ describe('PokerGame 引擎', () => {
     }
     // 之后各街无人下注，超时自动过牌直到摊牌
     for (let i = 0; i < 30 && !game.hand?.results; i++)
-      clock.advance(clock.nowMs + 26_000)
+      step(game, clock, 26_000)
     expect(game.hand?.results).not.toBeNull()
     // 结算后 totalBet 仅作展示，守恒看纯筹码和
     const stacks = [...game.players.values()].reduce((s, p) => s + p.stack, 0)
@@ -155,7 +167,7 @@ describe('PokerGame 引擎', () => {
     game.startGame('a')
 
     let guard = 0
-    while (!game.hand?.results && guard++ < 100) {
+    while (!game.hand?.results && guard++ < 200) {
       const toAct = game.toActId
       if (toAct) {
         const p = game.players.get(toAct)!
@@ -166,7 +178,7 @@ describe('PokerGame 引擎', () => {
           game.act(toAct, 'call')
       }
       else {
-        clock.advance(clock.nowMs + 2000) // 跑马发牌
+        step(game, clock, 2000) // 跑马发牌
       }
     }
     expect(game.hand?.results).not.toBeNull()
@@ -194,16 +206,6 @@ describe('PokerGame 引擎', () => {
     }
   })
 
-  it('超时自动行动：需跟注时弃牌、无需跟注时过牌', () => {
-    const clock = new FakeClock()
-    const game = makeGame(clock)
-    join3(game)
-    game.startGame('a')
-    const first = game.toActId!
-    clock.advance(clock.nowMs + 26_000)
-    expect(game.players.get(first)!.folded).toBe(true) // 面对大盲注，超时弃牌
-  })
-
   it('机器人完整对局能正常结束', () => {
     const clock = new FakeClock()
     const game = makeGame(clock)
@@ -212,8 +214,34 @@ describe('PokerGame 引擎', () => {
     game.addBot()
     game.startGame('h')
     let guard = 0
-    while (!game.hand?.results && guard++ < 200)
-      clock.advance(clock.nowMs + 3000)
+    while (!game.hand?.results && guard++ < 500)
+      step(game, clock, 3000)
+    expect(game.hand?.results).not.toBeNull()
+  })
+
+  it('行动者离场后行动权顺延，牌局不卡死', () => {
+    const clock = new FakeClock()
+    const game = makeGame(clock)
+    join3(game)
+    game.startGame('a')
+    const first = game.toActId!
+    // 当前行动者直接离场
+    game.remove(first)
+    expect(game.toActId).not.toBeNull()
+    expect(game.toActId).not.toBe(first)
+    // 剩余两人能继续把这一手打完
+    for (let i = 0; i < 40 && !game.hand?.results; i++) {
+      const toAct = game.toActId
+      if (toAct) {
+        const p = game.players.get(toAct)!
+        const toCall = game.currentBet - p.roundBet
+        if (toCall > 0) game.act(toAct, 'call')
+        else game.act(toAct, 'check')
+      }
+      else {
+        step(game, clock, 26_000)
+      }
+    }
     expect(game.hand?.results).not.toBeNull()
   })
 })

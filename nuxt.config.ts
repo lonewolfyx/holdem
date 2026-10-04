@@ -12,8 +12,10 @@ export default defineNuxtConfig({
     plugins: [tailwindcss()],
   },
   nitro: {
-    experimental: {
-      websocket: true,
+    // better-sqlite3 是原生模块：必须外置出打包产物，由运行时从 node_modules 加载，
+    // 否则 rollup 打包 .node 二进制会导致构建/运行失败
+    externals: {
+      external: ['better-sqlite3'],
     },
   },
   app: {

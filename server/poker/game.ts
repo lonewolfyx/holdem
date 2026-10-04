@@ -7,8 +7,6 @@ import { decideBot } from './bots'
 export class GameError extends Error {}
 
 export type Rng = () => number
-/** 注册延时回调，返回取消函数 */
-export type Scheduler = (fn: () => void, ms: number) => () => void
 
 export interface GameConfig {
   smallBlind: number
@@ -38,6 +36,9 @@ export const DEFAULT_CONFIG: GameConfig = {
   nextHandMs: 5000,
 }
 
+/** 在线判定阈值：最近一次心跳在该时限内视为在线 */
+export const PRESENCE_TTL_MS = 12_000
+
 export interface JoinInfo {
   id: string
   name: string
@@ -45,13 +46,15 @@ export interface JoinInfo {
   isBot: boolean
 }
 
-interface GPlayer {
+export interface GPlayer {
   id: string
   name: string
   avatar: string
   isBot: boolean
   isHost: boolean
   connected: boolean
+  /** 最近一次心跳（轮询/命令）时间，epoch ms */
+  lastSeen: number
   seatOrder: number
   stack: number
   inHand: boolean
@@ -67,13 +70,42 @@ interface GPlayer {
   won: number
 }
 
+/**
+ * 待处理事件：同一时刻最多一个。
+ * 用可序列化的「时间点 + 类型」替代 setTimeout，配合 tick() 惰性推进，
+ * 使引擎不依赖后台定时器（serverless 冻结安全，重启后可追赶进度）。
+ */
+export type PendingKind = 'bot-act' | 'turn-timeout' | 'street' | 'result' | 'next-hand'
+
 export interface PokerDeps {
   rng?: Rng
-  schedule?: Scheduler
   now?: () => number
-  /** 状态变化后通知（服务端在此广播） */
+  /** 状态变化后通知（服务端在此递增版本号并持久化） */
   onChange?: () => void
   config?: Partial<GameConfig>
+}
+
+export interface GameSnapshot {
+  cfg: GameConfig
+  phase: RoomPhase
+  championId: string | null
+  handNo: number
+  stage: Stage
+  dealerOrder: number
+  community: CardType[]
+  currentBet: number
+  minRaise: number
+  toActId: string | null
+  deadline: number
+  nextHandAt: number | null
+  results: PotResult[] | null
+  hand: HandView | null
+  remainingDeck: CardType[]
+  seatSeq: number
+  pendingAt: number | null
+  pendingKind: PendingKind | null
+  pendingWho: string | null
+  players: GPlayer[]
 }
 
 const baseSeat = (p: GPlayer): SeatView => ({
@@ -113,24 +145,85 @@ export class PokerGame {
   nextHandAt: number | null = null
   results: PotResult[] | null = null
 
+  pendingAt: number | null = null
+  pendingKind: PendingKind | null = null
+  pendingWho: string | null = null
+
   private rng: Rng
-  private schedule: Scheduler
   private now: () => number
   private onChange: () => void
   private seatSeq = 0
-  private handEpoch = 0
-  private turnCancel: (() => void) | null = null
-  private extraCancels: Array<() => void> = []
 
   constructor(deps: PokerDeps = {}) {
     this.rng = deps.rng ?? Math.random
-    this.schedule = deps.schedule ?? ((fn, ms) => {
-      const t = setTimeout(fn, ms)
-      return () => clearTimeout(t)
-    })
     this.now = deps.now ?? Date.now
     this.onChange = deps.onChange ?? (() => {})
     this.cfg = { ...DEFAULT_CONFIG, ...deps.config }
+  }
+
+  /* ---------------------------------- 待处理事件 ---------------------------------- */
+
+  private setPending(kind: PendingKind, ms: number, who: string | null = null) {
+    this.pendingAt = this.now() + ms
+    this.pendingKind = kind
+    this.pendingWho = who
+  }
+
+  private cancelPending() {
+    this.pendingAt = null
+    this.pendingKind = null
+    this.pendingWho = null
+  }
+
+  /**
+   * 惰性推进：把所有到期的待处理事件按序执行。
+   * 每个请求入口先调用，保证读到的状态是「当前时间」的最新状态。
+   */
+  tick(now = this.now()) {
+    let guard = 0
+    while (this.pendingAt !== null && this.pendingAt <= now && guard++ < 1000) {
+      const kind = this.pendingKind
+      const who = this.pendingWho
+      this.cancelPending()
+      if (!kind) break
+      switch (kind) {
+        case 'bot-act': {
+          const p = who ? this.players.get(who) : undefined
+          if (p?.isBot && this.toActId === p.id) this.botAct(p)
+          break
+        }
+        case 'turn-timeout': {
+          const p = who ? this.players.get(who) : undefined
+          if (p && this.toActId === p.id) this.autoAct(p)
+          break
+        }
+        case 'street':
+          if (this.hand) this.endStreet()
+          break
+        case 'result':
+          if (this.hand) this.finishHand()
+          break
+        case 'next-hand':
+          if (this.phase === 'playing') this.startHand()
+          break
+      }
+    }
+
+    // 在线状态翻转检测：断线玩家的 connected 变化需广播给其他客户端
+    for (const p of this.players.values()) {
+      if (p.isBot) continue
+      const online = now - p.lastSeen < PRESENCE_TTL_MS
+      if (online !== p.connected) {
+        p.connected = online
+        this.push()
+      }
+    }
+  }
+
+  /** 心跳：刷新玩家在线时间（不触发版本变化，由 tick 的翻转检测负责广播） */
+  touch(id: string, now = this.now()) {
+    const p = this.players.get(id)
+    if (p && !p.isBot) p.lastSeen = now
   }
 
   /* ---------------------------------- 玩家管理 ---------------------------------- */
@@ -149,6 +242,7 @@ export class PokerGame {
       isBot: info.isBot,
       isHost: this.players.size === 0,
       connected: !info.isBot,
+      lastSeen: this.now(),
       seatOrder: this.seatSeq++,
       stack: this.cfg.buyIn,
       inHand: false,
@@ -171,6 +265,7 @@ export class PokerGame {
   remove(id: string) {
     const p = this.players.get(id)
     if (!p) return
+    const wasToAct = this.toActId === id
     if (p.inHand && !p.folded && this.hand) {
       // 牌局中离开视为弃牌，已投入筹码留在池内
       p.folded = true
@@ -180,6 +275,12 @@ export class PokerGame {
     this.players.delete(id)
     if (this.phase === 'lobby')
       this.reassignHost()
+    if (wasToAct && this.hand) {
+      // 行动者离场：立即把行动权推进到下一位，避免牌局卡死
+      this.cancelPending()
+      this.deadline = 0
+      this.afterAction(p)
+    }
     this.push()
   }
 
@@ -190,13 +291,6 @@ export class PokerGame {
     const next = sorted.find(p => !p.isBot) ?? sorted[0]
     if (!next) return
     next.isHost = true
-  }
-
-  setConnected(id: string, connected: boolean) {
-    const p = this.players.get(id)
-    if (!p || p.connected === connected) return
-    p.connected = connected
-    this.push()
   }
 
   addBot(): GPlayer {
@@ -246,7 +340,7 @@ export class PokerGame {
     const by = this.players.get(byId)
     if (!by?.isHost)
       throw new GameError('只有房主才能重开游戏')
-    this.cancelAll()
+    this.cancelPending()
     this.hand = null
     this.results = null
     this.phase = 'lobby'
@@ -275,8 +369,7 @@ export class PokerGame {
   }
 
   startHand() {
-    this.cancelAll()
-    this.handEpoch++
+    this.cancelPending()
     this.nextHandAt = null
     this.results = null
 
@@ -404,19 +497,12 @@ export class PokerGame {
     this.toActId = p.id
     p.acted = false
     this.deadline = this.now() + this.cfg.turnMs
-    this.turnCancel?.()
-    const epoch = this.handEpoch
-    this.turnCancel = this.schedule(() => {
-      if (epoch !== this.handEpoch || this.toActId !== p.id) return
-      this.autoAct(p)
-    }, this.cfg.turnMs)
     if (p.isBot) {
       const delay = this.cfg.botMinMs + this.rng() * (this.cfg.botMaxMs - this.cfg.botMinMs)
-      const botCancel = this.schedule(() => {
-        if (epoch !== this.handEpoch || this.toActId !== p.id) return
-        this.botAct(p)
-      }, delay)
-      this.extraCancels.push(botCancel)
+      this.setPending('bot-act', Math.min(delay, this.cfg.turnMs), p.id)
+    }
+    else {
+      this.setPending('turn-timeout', this.cfg.turnMs, p.id)
     }
     this.push()
   }
@@ -458,7 +544,7 @@ export class PokerGame {
     this.afterAction(p)
   }
 
-  /** 玩家/客户端请求行动（含校验）。校验失败时不取消回合计时器 */
+  /** 玩家/客户端请求行动（含校验）。校验失败时不取消待处理事件 */
   act(playerId: string, kind: ActionKind, amount?: number) {
     const p = this.players.get(playerId)
     if (!this.hand || !this.toActId)
@@ -467,8 +553,7 @@ export class PokerGame {
       throw new GameError('还没轮到你行动')
     if (!p) throw new GameError('玩家不存在')
     this.apply(p, kind, amount)
-    this.turnCancel?.()
-    this.turnCancel = null
+    this.cancelPending()
     this.afterAction(p)
   }
 
@@ -602,13 +687,8 @@ export class PokerGame {
     const canAct = this.canAct()
     this.push()
     if (canAct.length <= 1) {
-      // 其余玩家全下：自动发完剩余公共牌
-      const epoch = this.handEpoch
-      const t = this.schedule(() => {
-        if (epoch !== this.handEpoch) return
-        this.endStreet()
-      }, this.cfg.streetMs)
-      this.extraCancels.push(t)
+      // 其余玩家全下：稍后自动发完剩余公共牌（跑马）
+      this.setPending('street', this.cfg.streetMs)
     }
     else {
       this.beginTurn(this.nextFrom(this.dealerOrder))
@@ -626,12 +706,7 @@ export class PokerGame {
     this.toActId = null
     for (const p of this.players.values()) p.roundBet = 0
     this.push()
-    const epoch = this.handEpoch
-    const t = this.schedule(() => {
-      if (epoch !== this.handEpoch) return
-      this.finishHand()
-    }, this.cfg.resultMs * 0.7)
-    this.extraCancels.push(t)
+    this.setPending('result', this.cfg.resultMs * 0.7)
   }
 
   private showdown() {
@@ -666,16 +741,11 @@ export class PokerGame {
     for (const p of this.players.values()) p.roundBet = 0
 
     this.push()
-    const epoch = this.handEpoch
-    const t = this.schedule(() => {
-      if (epoch !== this.handEpoch) return
-      this.finishHand()
-    }, this.cfg.resultMs)
-    this.extraCancels.push(t)
+    this.setPending('result', this.cfg.resultMs)
   }
 
   private finishHand() {
-    this.cancelAll()
+    this.cancelPending()
     this.toActId = null
     for (const p of this.players.values()) {
       if (p.stack === 0 && p.inHand) {
@@ -693,26 +763,50 @@ export class PokerGame {
       return
     }
     this.nextHandAt = this.now() + this.cfg.nextHandMs
-    const epoch = ++this.handEpoch
-    const t = this.schedule(() => {
-      if (epoch !== this.handEpoch) return
-      this.startHand()
-    }, this.cfg.nextHandMs)
-    this.extraCancels.push(t)
+    this.setPending('next-hand', this.cfg.nextHandMs)
     this.push()
-  }
-
-  private cancelAll() {
-    this.turnCancel?.()
-    this.turnCancel = null
-    for (const c of this.extraCancels) c()
-    this.extraCancels = []
   }
 
   private push() {
     if (this.hand)
       Object.assign(this.hand, this.buildHandView())
     this.onChange()
+  }
+
+  /* ---------------------------------- 序列化 ---------------------------------- */
+
+  serialize(): GameSnapshot {
+    return {
+      cfg: this.cfg,
+      phase: this.phase,
+      championId: this.championId,
+      handNo: this.handNo,
+      stage: this.stage,
+      dealerOrder: this.dealerOrder,
+      community: [...this.community],
+      currentBet: this.currentBet,
+      minRaise: this.minRaise,
+      toActId: this.toActId,
+      deadline: this.deadline,
+      nextHandAt: this.nextHandAt,
+      results: this.results,
+      hand: this.hand,
+      remainingDeck: [...this.remainingDeck],
+      seatSeq: this.seatSeq,
+      pendingAt: this.pendingAt,
+      pendingKind: this.pendingKind,
+      pendingWho: this.pendingWho,
+      players: [...this.players.values()],
+    }
+  }
+
+  /** 从持久化快照恢复； overdue 的待处理事件由下一次 tick() 追赶执行 */
+  static restore(snap: GameSnapshot, deps: PokerDeps = {}): PokerGame {
+    const game = new PokerGame(deps)
+    const { players, ...rest } = snap
+    Object.assign(game, rest)
+    game.players = new Map(players.map(p => [p.id, p]))
+    return game
   }
 
   /* ---------------------------------- 视图 ---------------------------------- */
