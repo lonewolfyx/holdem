@@ -15,8 +15,12 @@ type ConnState = 'idle' | 'connecting' | 'open' | 'closed'
 const POLL_BASE_MS = 900
 const POLL_ACTIVE_MS = 500
 const POLL_BACKOFF_MAX_MS = 6000
-/** 连续 4xx（房间消失/登录失效）达到该次数后停止轮询 */
-const FATAL_4XX_LIMIT = 3
+/**
+ * 404/401 容忍窗口：Serverless 平台（如 Vercel）会同时运行多个函数实例，
+ * 房间数据只在其中一个实例的临时盘上——打到其它实例的请求会瞬时 404，
+ * 不应因此把在线玩家踢出房间；窗口内持续重试，直到落到持有房间的实例。
+ */
+const FATAL_GRACE_MS = 120_000
 
 const state = shallowRef<ClientRoomState | null>(null)
 const connection = shallowRef<ConnState>('idle')
@@ -31,7 +35,7 @@ let pollTimer: ReturnType<typeof setTimeout> | null = null
 let pollGeneration = 0
 let pollInFlight = false
 let errorStreak = 0
-let fatal4xx = 0
+let firstFatalAt: number | null = null
 let toastTimer: ReturnType<typeof setTimeout> | null = null
 
 function showToast(text: string) {
@@ -63,7 +67,7 @@ function applyState(next: ClientRoomState, v: number) {
   version = v
   connection.value = 'open'
   errorStreak = 0
-  fatal4xx = 0
+  firstFatalAt = null
 }
 
 async function pollLoop() {
@@ -88,7 +92,7 @@ async function pollLoop() {
       version = res.v
       connection.value = 'open'
       errorStreak = 0
-      fatal4xx = 0
+      firstFatalAt = null
     }
     schedulePoll()
   }
@@ -114,9 +118,9 @@ function handlePollError(err: any) {
     return
   }
   if (status === 404 || status === 401) {
-    fatal4xx++
-    if (fatal4xx >= FATAL_4XX_LIMIT) {
-      // 房间真的没了（或身份失效）：停止轮询并提示
+    // 容忍窗口内持续重试（多实例平台上的瞬时 404 不应踢人）
+    firstFatalAt ??= Date.now()
+    if (Date.now() - firstFatalAt >= FATAL_GRACE_MS) {
       stopPolling()
       connection.value = 'closed'
       state.value = null
@@ -127,7 +131,7 @@ function handlePollError(err: any) {
     }
   }
   else {
-    fatal4xx = 0
+    firstFatalAt = null
   }
   errorStreak++
   // 连续两次失败才亮「重连」状态，避免单次网络抖动造成闪烁
@@ -218,7 +222,7 @@ export function useRoom() {
     credentials = id
     version = 0
     errorStreak = 0
-    fatal4xx = 0
+    firstFatalAt = null
     gone.value = false
     connection.value = 'connecting'
     schedulePoll(0)
