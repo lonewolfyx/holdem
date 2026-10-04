@@ -1,4 +1,4 @@
-import { getRoom, verifyToken } from '../../../../utils/rooms'
+import { getRoom, heartbeat, verifyToken } from '../../../../utils/rooms'
 
 export default defineEventHandler(async (event) => {
   const code = getRouterParam(event, 'code')?.toUpperCase() ?? ''
@@ -6,7 +6,7 @@ export default defineEventHandler(async (event) => {
   const entry = await getRoom(code)
   if (!entry || !body.playerId || !verifyToken(entry, body.playerId, body.token ?? ''))
     return { ok: false }
-  entry.game.touch(body.playerId)
+  heartbeat(entry, body.playerId)
   entry.game.tick()
   const player = entry.game.players.get(body.playerId)
   if (!player)

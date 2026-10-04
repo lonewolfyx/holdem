@@ -273,8 +273,6 @@ export class PokerGame {
       p.lastAction = { k: 'fold', amount: 0 }
     }
     this.players.delete(id)
-    if (this.phase === 'lobby')
-      this.reassignHost()
     if (wasToAct && this.hand) {
       // 行动者离场：立即把行动权推进到下一位，避免牌局卡死
       this.cancelPending()
@@ -282,15 +280,6 @@ export class PokerGame {
       this.afterAction(p)
     }
     this.push()
-  }
-
-  private reassignHost() {
-    if (this.players.size === 0) return
-    if ([...this.players.values()].some(p => p.isHost)) return
-    const sorted = [...this.players.values()].sort((a, b) => a.seatOrder - b.seatOrder)
-    const next = sorted.find(p => !p.isBot) ?? sorted[0]
-    if (!next) return
-    next.isHost = true
   }
 
   addBot(): GPlayer {
