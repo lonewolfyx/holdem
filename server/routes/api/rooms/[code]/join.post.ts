@@ -1,5 +1,5 @@
-import { getRoom, randomId, registerPlayer } from '../../../../utils/rooms'
 import { GameError } from '../../../../poker/game'
+import { getRoom, randomId, registerPlayer } from '../../../../utils/rooms'
 
 const AVATAR_POOL = ['🦊', '🐼', '🐸', '🦁', '🐯', '🐨', '🐵', '🦉', '🐧', '🐺', '🦄', '🐙']
 
@@ -10,9 +10,12 @@ export default defineEventHandler(async (event) => {
   if (!name)
     throw createError({ statusCode: 400, statusMessage: '昵称不能为空' })
 
-  const entry = getRoom(code)
+  const entry = await getRoom(code)
   if (!entry)
     throw createError({ statusCode: 404, statusMessage: '房间不存在或已过期' })
+
+  // 追赶牌局进度后再入座
+  entry.game.tick()
 
   const playerId = randomId()
   const token = randomId(16)

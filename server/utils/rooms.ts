@@ -1,24 +1,29 @@
-import { PokerGame } from '../poker/game'
+import { PokerGame, type GameSnapshot } from '../poker/game'
+import { ensureDb, peekDb } from './db'
 
 export interface RoomEntry {
   code: string
   game: PokerGame
   /** playerId → 认证 token */
   tokens: Map<string, string>
+  /** 每次状态变化递增；客户端据此做增量轮询 */
+  version: number
   createdAt: number
   lastActive: number
 }
-
-/** 每个在线玩家可能有多条连接（多标签页） */
-export const peersByPlayer = new Map<string, Set<any>>()
 
 declare global {
   // eslint-disable-next-line ts/no-var-requires
   var __holdemRooms: Map<string, RoomEntry> | undefined
 }
 
+/**
+ * 房间注册表：内存为热路径缓存（轮询读零 SQL），SQLite 做写穿持久化。
+ * 写穿保证 Node 部署重启后房间可恢复；读缓存保证高频轮询不产生数据库压力。
+ */
 const rooms: Map<string, RoomEntry> = (globalThis.__holdemRooms ??= new Map())
 
+const ROOM_TTL_MS = 24 * 3600 * 1000
 const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
 
 function randomCode(len = 4): string {
@@ -34,84 +39,112 @@ export function randomId(bytes = 12): string {
   return [...arr].map(b => b.toString(16).padStart(2, '0')).join('')
 }
 
-/** 推送个性化状态给房间内每个连接 */
-export function broadcast(entry: RoomEntry) {
-  entry.lastActive = Date.now()
-  const payloadFor = new Map<string, string>()
-  for (const p of entry.game.players.values()) {
-    if (p.isBot || !p.connected) continue
-    payloadFor.set(p.id, JSON.stringify({ t: 'state', state: entry.game.view(p.id) }))
-  }
-  for (const [playerId, payload] of payloadFor) {
-    for (const peer of peersByPlayer.get(playerId) ?? []) {
-      try {
-        peer.send(payload)
-      }
-      catch {
-        // 连接已断开，close 回调会清理
-      }
-    }
-  }
+/* ---------------------------------- 持久化 ---------------------------------- */
+
+interface StoredRoom {
+  v: number
+  tokens: [string, string][]
+  createdAt: number
+  lastActive: number
+  game: GameSnapshot
 }
 
-export function createRoom(): RoomEntry {
-  // 顺手清理 24 小时未活跃的房间
+/** 写穿持久化（token 等非游戏状态变更后也需调用） */
+export function persistRoom(entry: RoomEntry) {
+  const db = peekDb()
+  if (!db) return
+  const stored: StoredRoom = {
+    v: entry.version,
+    tokens: [...entry.tokens.entries()],
+    createdAt: entry.createdAt,
+    lastActive: entry.lastActive,
+    game: entry.game.serialize(),
+  }
+  db.putRow(entry.code, entry.version, JSON.stringify(stored), entry.lastActive)
+}
+
+/** 状态变化入口：版本号 +1 并写穿到 SQLite */
+export function markDirty(entry: RoomEntry) {
+  entry.version++
+  entry.lastActive = Date.now()
+  persistRoom(entry)
+}
+
+function hydrateRoom(code: string, stored: StoredRoom): RoomEntry {
+  const entry: RoomEntry = {
+    code,
+    version: stored.v,
+    tokens: new Map(stored.tokens),
+    game: null!, // 立即赋值（restore 需要 entry 引用做 onChange 闭包）
+    createdAt: stored.createdAt,
+    lastActive: stored.lastActive,
+  }
+  entry.game = PokerGame.restore(stored.game, { onChange: () => markDirty(entry) })
+  entry.game.code = code
+  return entry
+}
+
+/* ---------------------------------- API ---------------------------------- */
+
+export async function createRoom(): Promise<RoomEntry> {
+  await ensureDb()
   const now = Date.now()
+
+  // 顺手清理 24 小时未活跃的房间
   for (const [code, entry] of rooms) {
-    if (now - entry.lastActive > 24 * 3600 * 1000)
+    if (now - entry.lastActive > ROOM_TTL_MS)
       rooms.delete(code)
   }
+  const db = peekDb()
+  db?.purgeRows(now - ROOM_TTL_MS)
+
   let code = randomCode()
   while (rooms.has(code)) code = randomCode()
   const entry: RoomEntry = {
     code,
-    game: new PokerGame({ onChange: () => broadcast(entry) }),
+    version: 1,
     tokens: new Map(),
+    game: null!,
     createdAt: now,
     lastActive: now,
   }
+  entry.game = new PokerGame({ onChange: () => markDirty(entry) })
   entry.game.code = code
   rooms.set(code, entry)
+  persistRoom(entry)
   return entry
 }
 
-export function getRoom(code: string): RoomEntry | undefined {
-  return rooms.get(code?.toUpperCase())
+export async function getRoom(code: string): Promise<RoomEntry | undefined> {
+  const key = code?.toUpperCase()
+  const cached = rooms.get(key)
+  if (cached) return cached
+
+  await ensureDb()
+  const db = peekDb()
+  const row = db?.getRow(key)
+  if (!row) return undefined
+  try {
+    const stored = JSON.parse(row.data) as StoredRoom
+    if (Date.now() - stored.lastActive > ROOM_TTL_MS) {
+      db?.delRow(key)
+      return undefined
+    }
+    const entry = hydrateRoom(key, stored)
+    rooms.set(key, entry)
+    return entry
+  }
+  catch (err) {
+    console.error(`[holdem] 房间 ${key} 快照损坏，忽略:`, err)
+    return undefined
+  }
 }
 
 export function registerPlayer(entry: RoomEntry, playerId: string, token: string) {
   entry.tokens.set(playerId, token)
+  persistRoom(entry)
 }
 
 export function verifyToken(entry: RoomEntry, playerId: string, token: string): boolean {
   return entry.tokens.get(playerId) === token
-}
-
-export function attachPeer(playerId: string, peer: any) {
-  let set = peersByPlayer.get(playerId)
-  if (!set) {
-    set = new Set()
-    peersByPlayer.set(playerId, set)
-  }
-  set.add(peer)
-}
-
-export function detachPeer(playerId: string, peer: any): boolean {
-  const set = peersByPlayer.get(playerId)
-  if (!set) return false
-  set.delete(peer)
-  if (set.size === 0) {
-    peersByPlayer.delete(playerId)
-    return true
-  }
-  return false
-}
-
-export function sendTo(playerId: string, payload: object) {
-  for (const peer of peersByPlayer.get(playerId) ?? []) {
-    try {
-      peer.send(JSON.stringify(payload))
-    }
-    catch {}
-  }
 }

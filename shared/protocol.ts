@@ -93,9 +93,8 @@ export interface ClientRoomState {
 
 export type ActionKind = 'fold' | 'check' | 'call' | 'raise'
 
-/** 客户端 → 服务端 */
-export type ClientMessage =
-  | { t: 'hello'; code: string; playerId: string; token: string }
+/** 客户端 → 服务端：房间命令体（POST /api/rooms/:code/command） */
+export type CommandBody =
   | { t: 'start' }
   | { t: 'add-bot' }
   | { t: 'action'; kind: ActionKind; amount?: number }
@@ -103,7 +102,22 @@ export type ClientMessage =
   | { t: 'reset' }
   | { t: 'leave' }
 
-/** 服务端 → 客户端 */
-export type ServerMessage =
-  | { t: 'state'; state: ClientRoomState }
-  | { t: 'error'; text: string }
+/** 附带鉴权的完整命令请求（扁平结构，便于服务端读取） */
+export interface CommandRequest {
+  playerId: string
+  token: string
+  t: CommandBody['t']
+  kind?: ActionKind
+  amount?: number
+}
+
+/** 命令响应：总是返回执行后的最新状态，省一次轮询 */
+export interface CommandResponse {
+  v: number
+  state: ClientRoomState
+}
+
+/** 状态轮询响应（GET /api/rooms/:code/state?playerId&token&v）：无变化时返回轻量心跳 */
+export type StateResponse =
+  | { v: number; changed: false }
+  | { v: number; changed: true; state: ClientRoomState }
