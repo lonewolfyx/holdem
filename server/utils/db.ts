@@ -21,12 +21,23 @@ const TABLE = `
   )
 `
 
+/** 已解散房间的墓碑：让成员端区分「房主解散」(410) 与「房间不存在」(404) */
+const TOMBSTONE = `
+  CREATE TABLE IF NOT EXISTS dissolved (
+    code TEXT PRIMARY KEY,
+    at   INTEGER NOT NULL
+  )
+`
+
 export interface HoldemDb {
   raw: SqliteDatabase
   getRow(code: string): { version: number, data: string } | undefined
   putRow(code: string, version: number, data: string, updatedAt: number): void
   delRow(code: string): void
   purgeRows(before: number): void
+  markDissolved(code: string, at: number): void
+  getDissolved(code: string): { at: number } | undefined
+  purgeDissolved(before: number): void
 }
 
 let db: HoldemDb | null = null
@@ -52,6 +63,7 @@ async function openDb(): Promise<HoldemDb | null> {
     raw.pragma('journal_mode = WAL')
     raw.pragma('synchronous = NORMAL')
     raw.exec(TABLE)
+    raw.exec(TOMBSTONE)
     const get = raw.prepare<[string], { version: number, data: string }>(
       'SELECT version, data FROM rooms WHERE code = ?',
     )
@@ -61,12 +73,20 @@ async function openDb(): Promise<HoldemDb | null> {
     )
     const del = raw.prepare<[string]>('DELETE FROM rooms WHERE code = ?')
     const purge = raw.prepare<[number]>('DELETE FROM rooms WHERE updated_at < ?')
+    const markDissolved = raw.prepare<[string, number]>(
+      'INSERT INTO dissolved (code, at) VALUES (?, ?) ON CONFLICT(code) DO UPDATE SET at = excluded.at',
+    )
+    const getDissolved = raw.prepare<[string], { at: number }>('SELECT at FROM dissolved WHERE code = ?')
+    const purgeDissolved = raw.prepare<[number]>('DELETE FROM dissolved WHERE at < ?')
     return {
       raw,
       getRow: code => get.get(code),
       putRow: (code, version, data, updatedAt) => put.run(code, version, data, updatedAt),
       delRow: code => del.run(code),
       purgeRows: before => purge.run(before),
+      markDissolved: (code, at) => markDissolved.run(code, at),
+      getDissolved: code => getDissolved.get(code),
+      purgeDissolved: before => purgeDissolved.run(before),
     }
   }
   catch (err) {

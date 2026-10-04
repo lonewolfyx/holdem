@@ -21,6 +21,8 @@ const FATAL_4XX_LIMIT = 3
 const state = shallowRef<ClientRoomState | null>(null)
 const connection = shallowRef<ConnState>('idle')
 const toast = shallowRef<{ text: string, at: number } | null>(null)
+/** 房间已解散/已失效：置位后牌桌页自动退回大厅 */
+const gone = shallowRef(false)
 
 let currentCode = ''
 let credentials: { playerId: string, token: string } | null = null
@@ -101,6 +103,16 @@ async function pollLoop() {
 
 function handlePollError(err: any) {
   const status = err?.status ?? err?.response?.status
+  // 410 = 房间已被房主解散：立即停止轮询并通知页面退回大厅
+  if (status === 410) {
+    stopPolling()
+    connection.value = 'closed'
+    state.value = null
+    gone.value = true
+    showToast('房间已解散')
+    if (currentCode) clearIdentity(currentCode)
+    return
+  }
   if (status === 404 || status === 401) {
     fatal4xx++
     if (fatal4xx >= FATAL_4XX_LIMIT) {
@@ -108,6 +120,7 @@ function handlePollError(err: any) {
       stopPolling()
       connection.value = 'closed'
       state.value = null
+      gone.value = true
       showToast(status === 404 ? '房间不存在或已过期' : '登录已失效，请重新加入')
       if (currentCode) clearIdentity(currentCode)
       return
@@ -142,8 +155,10 @@ async function command(msg: CommandBody): Promise<boolean> {
       // 400 可能伴随服务端状态推进（如行动超时被自动过牌），立即拉一次
       schedulePoll(0)
     }
-    else if (status === 404 || status === 401) {
-      showToast(status === 404 ? '房间不存在或已过期' : '登录已失效，请重新加入')
+    else if (status === 404 || status === 401 || status === 410) {
+      showToast(status === 410
+        ? '房间已解散'
+        : status === 404 ? '房间不存在或已过期' : '登录已失效，请重新加入')
       schedulePoll(POLL_BASE_MS)
     }
     else {
@@ -204,6 +219,7 @@ export function useRoom() {
     version = 0
     errorStreak = 0
     fatal4xx = 0
+    gone.value = false
     connection.value = 'connecting'
     schedulePoll(0)
     if (typeof document !== 'undefined')
@@ -226,13 +242,17 @@ export function useRoom() {
     currentCode = ''
     credentials = null
     state.value = null
+    gone.value = false
     connection.value = 'idle'
   }
 
-  /** 挂起轮询但不退出房间（页面卸载时） */
+  /** 挂起轮询（页面卸载时）。清空会话，防止卸载后 visibilitychange 触发幽灵轮询 */
   function suspend() {
     stopPolling()
     pollGeneration++
+    pollInFlight = false
+    credentials = null
+    currentCode = ''
     connection.value = 'idle'
   }
 
@@ -255,6 +275,7 @@ export function useRoom() {
     state,
     connection,
     toast,
+    gone,
     seats,
     hand,
     me,

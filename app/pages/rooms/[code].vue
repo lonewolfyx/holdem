@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, shallowRef } from 'vue'
+import { onBeforeUnmount, onMounted, shallowRef, watch } from 'vue'
 import { useRoom } from '~/composables/useRoom'
 
 const route = useRoute()
@@ -8,7 +8,7 @@ const router = useRouter()
 const code = computed(() =>
   String(route.params.code ?? '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 4))
 
-const { state, connection, hand, me, enterRoom, leaveRoom, suspend } = useRoom()
+const { state, connection, hand, me, isHost, gone, enterRoom, leaveRoom, suspend } = useRoom()
 const failed = shallowRef(false)
 
 onMounted(async () => {
@@ -19,6 +19,12 @@ onMounted(async () => {
     return
   }
   failed.value = false
+})
+
+/** 房间被解散（房主离开或超时清理）后自动退回大厅 */
+watch(gone, (isGone) => {
+  if (isGone)
+    router.replace('/')
 })
 
 /** 页面卸载挂起连接（保留身份，可自动重连） */
@@ -38,7 +44,7 @@ function onLeave() {
         class="flex items-center gap-1 rounded-full bg-white px-3.5 py-2 font-medium text-neutral-500 ring-1 ring-black/[0.06] shadow-sm transition-colors hover:bg-neutral-50"
         @click="onLeave"
       >
-        ← 离开
+        {{ isHost ? '← 解散房间' : '← 离开' }}
       </button>
       <div class="flex items-center gap-2">
         <span class="rounded-full bg-white px-3.5 py-2 font-mono text-[13px] font-bold tracking-[0.25em] text-neutral-700 ring-1 ring-black/[0.06] shadow-sm">
