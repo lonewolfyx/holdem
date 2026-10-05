@@ -121,8 +121,11 @@ async function createFileStore(file: string): Promise<RoomStore> {
 
 /* ---------------------------------- libsql:// 远程实现（Turso 等，纯 JS HTTP 客户端） ---------------------------------- */
 
-/** 由任意 libSQL 客户端构造存储（web 入口用于生产远程库；测试用 node 入口注入） */
-export function createLibsqlStoreFromClient(client: LibsqlLikeClient): RoomStore {
+/** 由任意 libSQL 客户端构造存储（web 入口用于生产远程库；测试用 node 入口注入）。
+ *  打开时幂等建表（IF NOT EXISTS），与 file: 模式行为一致。 */
+export async function createLibsqlStoreFromClient(client: LibsqlLikeClient): Promise<RoomStore> {
+  await client.execute({ sql: ROOM_TABLE_SQL })
+  await client.execute({ sql: TOMBSTONE_TABLE_SQL })
   const rowsOf = (r: { rows: unknown }) =>
     Array.from(r.rows as Array<Record<string, unknown>>, row => row as Record<string, unknown>)
 
@@ -177,7 +180,7 @@ export function createLibsqlStoreFromClient(client: LibsqlLikeClient): RoomStore
 
 async function createLibsqlStore(url: string, authToken: string | undefined): Promise<RoomStore> {
   const { createClient } = await import('@libsql/client/web')
-  return createLibsqlStoreFromClient(createClient({ url, authToken }))
+  return await createLibsqlStoreFromClient(createClient({ url, authToken }))
 }
 
 /* ---------------------------------- 入口 ---------------------------------- */
