@@ -3,11 +3,7 @@ import { createClient } from '@libsql/client'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import {
-  ROOM_TABLE_SQL,
-  TOMBSTONE_TABLE_SQL,
-  createLibsqlStoreFromClient,
-} from '../server/utils/db'
+import { createLibsqlStoreFromClient } from '../server/utils/db'
 
 /**
  * libSQL 存储实现的集成测试：用 @libsql/client 的 node 入口（file: 模式）
@@ -15,12 +11,11 @@ import {
  * 生产环境 web 入口仅传输层不同（HTTP），SQL 语义一致。
  */
 
-function makeStore() {
+async function makeStore() {
   const dir = mkdtempSync(join(tmpdir(), 'holdem-libsql-'))
   const client = createClient({ url: `file:${join(dir, 'test.sqlite')}` })
-  client.execute(ROOM_TABLE_SQL)
-  client.execute(TOMBSTONE_TABLE_SQL)
-  const store = createLibsqlStoreFromClient(client)
+  // 生产路径会在打开时幂等建表（db.ts 内），这里不手动建表以覆盖该行为
+  const store = await createLibsqlStoreFromClient(client)
   return {
     store,
     close: () => {
@@ -32,7 +27,7 @@ function makeStore() {
 
 describe('libSQL 存储实现（远程模式共用逻辑）', () => {
   it('createRow 建行成功，同码重复建行失败', async () => {
-    const { store, close } = makeStore()
+    const { store, close } = await makeStore()
     try {
       await expect(store.createRow('AAAA', 1, '{"v":1}', 1000)).resolves.toBe(true)
       await expect(store.createRow('AAAA', 1, '{"v":1}', 1000)).resolves.toBe(false)
@@ -43,7 +38,7 @@ describe('libSQL 存储实现（远程模式共用逻辑）', () => {
   })
 
   it('getVersion / getRow 读取行并正确映射类型', async () => {
-    const { store, close } = makeStore()
+    const { store, close } = await makeStore()
     try {
       await expect(store.getVersion('NOPE')).resolves.toBeUndefined()
       await store.createRow('BBBB', 7, '{"k":"数据"}', 2000)
@@ -56,7 +51,7 @@ describe('libSQL 存储实现（远程模式共用逻辑）', () => {
   })
 
   it('casRow 版本匹配写入、不匹配拒绝（不复活、不覆盖新状态）', async () => {
-    const { store, close } = makeStore()
+    const { store, close } = await makeStore()
     try {
       await store.createRow('CCCC', 3, '{"v":3}', 3000)
       // 版本匹配
@@ -76,7 +71,7 @@ describe('libSQL 存储实现（远程模式共用逻辑）', () => {
   })
 
   it('delRow 删除行', async () => {
-    const { store, close } = makeStore()
+    const { store, close } = await makeStore()
     try {
       await store.createRow('DDDD', 1, '{}', 4000)
       await store.delRow('DDDD')
@@ -88,7 +83,7 @@ describe('libSQL 存储实现（远程模式共用逻辑）', () => {
   })
 
   it('墓碑：markDissolved / getDissolved / purgeDissolved', async () => {
-    const { store, close } = makeStore()
+    const { store, close } = await makeStore()
     try {
       await expect(store.getDissolved('EEEE')).resolves.toBeUndefined()
       await store.markDissolved('EEEE', 5000)
@@ -105,7 +100,7 @@ describe('libSQL 存储实现（远程模式共用逻辑）', () => {
   })
 
   it('purgeRows 清理过期房间行', async () => {
-    const { store, close } = makeStore()
+    const { store, close } = await makeStore()
     try {
       await store.createRow('FFFF', 1, '{}', 1000)
       await store.createRow('GGGG', 1, '{}', 9000)
