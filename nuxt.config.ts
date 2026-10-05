@@ -9,7 +9,8 @@ export default defineNuxtConfig({
     '~/components',
   ],
   vite: {
-    plugins: [tailwindcss()],
+    // tailwindcss 的 vite 插件类型与 Nuxt 内置 vite 类型版本不一致，此处需断言
+    plugins: [tailwindcss()] as any,
   },
   nitro: {
     // better-sqlite3 是原生模块：必须外置出打包产物，由运行时从 node_modules 加载，

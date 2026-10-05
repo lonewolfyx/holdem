@@ -86,6 +86,11 @@ app/
      - `NUXT_DB_URL` = `libsql://<your-db>.turso.io`
      - `NUXT_DB_AUTH_TOKEN` = 数据库 token
   3. 重新部署。所有实例共享同一数据库，房间跨实例/跨部署存活。
+- **部署验证**：访问 `https://<你的域名>/api/health`——
+  返回 `{"store":"remote"}` 表示共享存储已生效；
+  返回 `{"store":"file"}` 说明环境变量未配置或未重新部署（Vercel 上此时房间
+  数据仍只存在于单个实例，多人会互相"找不到房间"）；
+  返回 `{"store":"memory"}` 说明存储初始化失败。
 - 原生模块（better-sqlite3）外置 + 惰性加载，远程模式使用纯 JS 客户端；
   存储初始化失败自动降级为纯内存模式。
 
