@@ -13,7 +13,10 @@ async function command(code, cred, body) {
   })
   if (!res.ok) {
     const data = await res.json().catch(() => ({}))
-    throw new Error(`命令 ${body.t} 失败: ${res.status} ${data.statusMessage ?? ''}`)
+    // 400 通常是命令前服务端 tick 刚推进了状态（如机器人下注），调用方应重拉状态重试
+    const err = new Error(`命令 ${body.t} 失败: ${res.status} ${data.statusMessage ?? ''}`)
+    err.status = res.status
+    throw err
   }
   return res.json()
 }
@@ -72,8 +75,14 @@ async function main() {
       const me = lastState.seats.find(s => s.id === cred.playerId)
       const toCall = hand.currentBet - me.roundBet
       const kind = toCall <= 0 ? 'check' : 'call'
-      const { state: after } = await command(code, cred, { t: 'action', kind })
-      lastState = after
+      try {
+        const { state: after } = await command(code, cred, { t: 'action', kind })
+        lastState = after
+      }
+      catch (err) {
+        // 状态已被服务端 tick 推进（如行动超时/机器人下注），重拉状态再决策
+        if (err.status !== 400) throw err
+      }
       continue
     }
     await new Promise(r => setTimeout(r, 400))

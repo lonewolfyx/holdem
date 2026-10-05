@@ -71,15 +71,23 @@ app/
   而是序列化为「待处理事件」，每个请求先 `tick()` 追赶到当前时间 —— 因此
   **Serverless 冻结安全**，进程重启后状态恢复、进度自动补跑。
 
-## 存储：本地 SQLite
+## 存储：SQLite（本地文件或 Turso 托管）
 
-房间状态（牌局 + 令牌 + 版本号）通过 better-sqlite3 持久化（WAL 模式，写穿缓存：
-热路径读内存、变更写 SQLite），进程重启后房间自动恢复。
+房间状态（牌局 + 令牌 + 版本号）通过统一存储层持久化（WAL / 条件写入）：
+内存做热缓存，变更以 CAS（版本号条件写）写穿存储，**多实例下不会用旧状态
+覆盖新状态**，读路径按版本号校验并自动重载最新状态。
 
-- 数据库路径：环境变量 `NUXT_DB_PATH`（默认 `./.data/holdem.sqlite`；
-  部署在 Vercel 等只读平台时自动用 `/tmp/holdem.sqlite`）。
-- 原生模块在 `nuxt.config.ts` 中通过 `nitro.externals.external` 外置，动态 import
-  惰性加载——不影响页面渲染路由的冷启动；初始化失败自动降级为纯内存模式。
+- **本地文件（默认）**：`.data/holdem.sqlite`（better-sqlite3），适合 Node 自托管；
+  路径可用 `NUXT_DB_PATH` 覆盖，部署在 Vercel 等只读平台时自动用 `/tmp/holdem.sqlite`。
+- **远程共享（Turso 等 libSQL）**：Serverless 多实例部署必须配置——
+  1. 注册 [Turso](https://turso.tech) 并创建数据库（免费额度足够）：
+     `turso db create holdem && turso db show holdem --url && turso db tokens create holdem`
+  2. 在 Vercel 项目环境变量中配置：
+     - `NUXT_DB_URL` = `libsql://<your-db>.turso.io`
+     - `NUXT_DB_AUTH_TOKEN` = 数据库 token
+  3. 重新部署。所有实例共享同一数据库，房间跨实例/跨部署存活。
+- 原生模块（better-sqlite3）外置 + 惰性加载，远程模式使用纯 JS 客户端；
+  存储初始化失败自动降级为纯内存模式。
 
 ### 房间生命周期
 
@@ -94,16 +102,12 @@ app/
 
 ### 部署说明
 
-- **Node 服务器 / Docker / Railway / Fly（带持久卷）**：推荐方式，SQLite 落盘，
-  重启不丢房。
-- **Vercel（重要限制）**：房间数据存在函数实例的 `/tmp` 里——实例之间不共享、
-  回收即清空。多人同时游玩会触发多实例分摊请求，打到「没有该房间」实例上的
-  请求返回 404；客户端会在 2 分钟容忍窗口内持续重试并自动恢复（不会立刻踢人），
-  但**实例回收后房间数据仍然会丢**。因此 Vercel 只适合单人/低流量试玩；
-  多人正式使用请二选一：
-  1. 部署到带持久文件系统的 Node 环境（代码零改动）；
-  2. 把 `server/utils/db.ts` 换成跨实例共享的外置存储
-     （如 Turso 托管 SQLite / Upstash Redis）。
+- **Vercel / Serverless 多实例**：必须配置远程共享存储（上方 `NUXT_DB_URL` +
+  `NUXT_DB_AUTH_TOKEN`，推荐 Turso）。不配置时房间数据落在实例本地的 `/tmp`，
+  实例之间不共享、回收即清空——客户端有 2 分钟容错窗口会自动重连恢复，
+  但数据本身无法存活，只适合单人/低流量试玩。
+- **Node 服务器 / Docker / Railway / Fly（带持久卷）**：推荐方式，无需任何配置，
+  本地 SQLite 落盘、重启不丢房；也可按需切到 Turso。
 
 ## 设计要点
 

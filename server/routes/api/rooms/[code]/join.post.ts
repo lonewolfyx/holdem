@@ -1,5 +1,5 @@
 import { GameError } from '../../../../poker/game'
-import { randomId, registerPlayer, requireRoom } from '../../../../utils/rooms'
+import { flushWrites, randomId, refreshIfStale, registerPlayer, requireRoom } from '../../../../utils/rooms'
 
 const AVATAR_POOL = ['🦊', '🐼', '🐸', '🦁', '🐯', '🐨', '🐵', '🦉', '🐧', '🐺', '🦄', '🐙']
 
@@ -10,7 +10,10 @@ export default defineEventHandler(async (event) => {
   if (!name)
     throw createError({ statusCode: 400, statusMessage: '昵称不能为空' })
 
-  const entry = await requireRoom(code)
+  let entry = await requireRoom(code)
+
+  // 另一实例可能已推进房间状态：以共享存储为准
+  entry = (await refreshIfStale(entry)) ?? await requireRoom(code)
 
   // 追赶牌局进度后再入座
   entry.game.tick()
@@ -29,5 +32,6 @@ export default defineEventHandler(async (event) => {
     throw err
   }
   registerPlayer(entry, playerId, token)
+  await flushWrites()
   return { code: entry.code, playerId, token, isHost: entry.game.players.get(playerId)!.isHost }
 })
