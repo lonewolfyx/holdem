@@ -1,6 +1,6 @@
 import type { ActionKind, CommandRequest } from '#shared/protocol'
 import { GameError } from '../../../../poker/game'
-import { dissolveRoom, heartbeat, persistRoom, requireRoom, verifyToken } from '../../../../utils/rooms'
+import { dissolveRoom, flushWrites, heartbeat, persistRoom, refreshIfStale, requireRoom, verifyToken } from '../../../../utils/rooms'
 
 const ACTION_KINDS = new Set<ActionKind>(['fold', 'check', 'call', 'raise'])
 
@@ -11,6 +11,8 @@ const ACTION_KINDS = new Set<ActionKind>(['fold', 'check', 'call', 'raise'])
  *
  * leave 语义：房主（创建者）离开 = 解散房间（成员端收到 410「房间已解散」）；
  * 普通玩家离开只退出自己的座位，房间继续存在。
+ * 命令前先 refreshIfStale() 对齐共享存储的最新状态（多实例一致性），
+ * 返回前 flushWrites() 确保变更落库（Serverless 冻结安全）。
  */
 export default defineEventHandler(async (event) => {
   const code = getRouterParam(event, 'code')?.toUpperCase() ?? ''
@@ -19,7 +21,12 @@ export default defineEventHandler(async (event) => {
   if (!playerId || !token)
     throw createError({ statusCode: 401, statusMessage: '登录已失效，请重新加入' })
 
-  const entry = await requireRoom(code)
+  let entry = await requireRoom(code)
+  if (!verifyToken(entry, playerId, token))
+    throw createError({ statusCode: 401, statusMessage: '登录已失效，请重新加入' })
+
+  // 另一实例可能已推进/解散房间：以共享存储为准
+  entry = (await refreshIfStale(entry)) ?? await requireRoom(code)
   if (!verifyToken(entry, playerId, token))
     throw createError({ statusCode: 401, statusMessage: '登录已失效，请重新加入' })
 
@@ -60,7 +67,7 @@ export default defineEventHandler(async (event) => {
         game.remove(playerId)
         entry.tokens.delete(playerId)
         if (leaving?.isHost) {
-          dissolveRoom(entry)
+          await dissolveRoom(entry)
         }
         else {
           persistRoom(entry)
@@ -77,5 +84,6 @@ export default defineEventHandler(async (event) => {
     throw err
   }
 
+  await flushWrites()
   return { v: entry.version, state: game.view(playerId) }
 })
