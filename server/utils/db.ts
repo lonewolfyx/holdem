@@ -2,7 +2,6 @@ import { mkdirSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 
 type SqliteDatabase = import('better-sqlite3').Database
-type LibsqlClient = import('@libsql/client/web').Client
 
 /**
  * 房间存储抽象：内存缓存之下的持久层。
@@ -54,6 +53,16 @@ export interface RoomStore {
   getDissolved(code: string): Promise<{ at: number } | undefined>
   purgeDissolved(before: number): Promise<void>
 }
+
+/** libSQL 客户端的最小结构面（web / node 入口均满足），便于测试注入 */
+type LibsqlInValue = null | string | number | bigint | ArrayBuffer
+
+export interface LibsqlLikeClient {
+  execute(stmt: { sql: string, args?: LibsqlInValue[] }): Promise<{ rows: unknown, rowsAffected: number }>
+}
+
+export const ROOM_TABLE_SQL = TABLE
+export const TOMBSTONE_TABLE_SQL = TOMBSTONE
 
 let storePromise: Promise<RoomStore | null> | null = null
 
@@ -112,11 +121,10 @@ async function createFileStore(file: string): Promise<RoomStore> {
 
 /* ---------------------------------- libsql:// 远程实现（Turso 等，纯 JS HTTP 客户端） ---------------------------------- */
 
-async function createLibsqlStore(url: string, authToken: string | undefined): Promise<RoomStore> {
-  const { createClient } = await import('@libsql/client/web')
-  const client: LibsqlClient = createClient({ url, authToken })
-
-  const rowsOf = (r: { rows: unknown[] }) => r.rows as Array<Record<string, unknown>>
+/** 由任意 libSQL 客户端构造存储（web 入口用于生产远程库；测试用 node 入口注入） */
+export function createLibsqlStoreFromClient(client: LibsqlLikeClient): RoomStore {
+  const rowsOf = (r: { rows: unknown }) =>
+    Array.from(r.rows as Array<Record<string, unknown>>, row => row as Record<string, unknown>)
 
   return {
     remote: true,
@@ -167,14 +175,27 @@ async function createLibsqlStore(url: string, authToken: string | undefined): Pr
   }
 }
 
+async function createLibsqlStore(url: string, authToken: string | undefined): Promise<RoomStore> {
+  const { createClient } = await import('@libsql/client/web')
+  return createLibsqlStoreFromClient(createClient({ url, authToken }))
+}
+
 /* ---------------------------------- 入口 ---------------------------------- */
+
+function resolveRemote(): { url: string, authToken: string | undefined } | null {
+  // 兼容 Vercel 市场里 Turso 集成注入的标准变量名（TURSO_DATABASE_URL 等）
+  const url = process.env.NUXT_DB_URL ?? process.env.TURSO_DATABASE_URL
+  if (!url || url.startsWith('file:'))
+    return null
+  return { url, authToken: process.env.NUXT_DB_AUTH_TOKEN ?? process.env.TURSO_AUTH_TOKEN }
+}
 
 async function openStore(): Promise<RoomStore | null> {
   try {
-    const url = process.env.NUXT_DB_URL
-    if (url && !url.startsWith('file:'))
-      return await createLibsqlStore(url, process.env.NUXT_DB_AUTH_TOKEN)
-    return createFileStore(url ? resolve(url.slice('file:'.length)) : resolveDbPath())
+    const remote = resolveRemote()
+    if (remote)
+      return await createLibsqlStore(remote.url, remote.authToken)
+    return createFileStore(resolveDbPath())
   }
   catch (err) {
     console.error('[holdem] 存储初始化失败，退化为内存存储（重启后房间不保留）:', err)

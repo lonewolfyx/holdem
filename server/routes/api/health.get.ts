@@ -11,6 +11,6 @@ export default defineEventHandler(async () => {
   if (!s)
     return { store: 'memory' }
   if (s.remote)
-    return { store: 'remote', db: process.env.NUXT_DB_URL ?? '' }
+    return { store: 'remote', db: process.env.NUXT_DB_URL ?? process.env.TURSO_DATABASE_URL ?? '' }
   return { store: 'file' }
 })
