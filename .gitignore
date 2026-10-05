@@ -4,3 +4,4 @@
 /.output/
 /.vercel/
 /.data/
+/.env*.local
