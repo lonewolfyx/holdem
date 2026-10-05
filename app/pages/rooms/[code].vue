@@ -21,10 +21,10 @@ onMounted(async () => {
   failed.value = false
 })
 
-/** 房间被解散（房主离开或超时清理）后自动退回大厅 */
+/** 房间被解散（房主离开或超时清理）后自动退回大厅（保留房间码便于重进/重开） */
 watch(gone, (isGone) => {
   if (isGone)
-    router.replace('/')
+    router.replace({ path: '/', query: { join: code.value } })
 })
 
 /** 页面卸载挂起连接（保留身份，可自动重连） */
