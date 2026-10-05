@@ -4,5 +4,8 @@
     "github>config-preset/renovate-config"
   ],
   // override any settings here
-  "automerge": true
+  "automerge": true,
+  // pnpm 11 的供应链策略默认拒绝发布不足 24h 的包（Vercel 构建会因此失败），
+  // 让 renovate 只选择发布满 2 天的版本，留出安全余量
+  "minimumReleaseAge": "2 days"
 }
