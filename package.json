@@ -2,7 +2,7 @@
   "name": "holdem",
   "private": true,
   "type": "module",
-  "packageManager": "pnpm@11.28.6",
+  "packageManager": "pnpm@11.28.8",
   "scripts": {
     "dev": "nuxt dev",
     "build": "nuxt build",
@@ -12,7 +12,7 @@
   },
   "dependencies": {
     "@libsql/client": "^0.18.0",
-    "@lucide/vue": "1.58.0",
+    "@lucide/vue": "1.61.0",
     "@tailwindcss/vite": "^4.3.3",
     "@vueuse/core": "^15.0.0",
     "better-sqlite3": "^13.0.3",
